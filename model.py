@@ -6,7 +6,7 @@ from matplotlib import animation
 # Paramètres des voitures
 N_ref = 50                      # Nombre de voitures
 L_ref = 4.5                    # Longueur d'une voiture 
-spacing_ref = 40.0              # Espacement de départ
+spacing_ref = 50.0              # Espacement de départ
 
 # Paramètres Physiques
 V_target_ref = 27.0             # Vitesse qu'on veut atteindre
@@ -14,12 +14,12 @@ a_max_ref = 3.0                # Accelation max
 a_min_ref = -7.0               # Décélération max
 
 # Paramètres de Comportement
-k_ref = 0.4                     # Agressivité en accélération
-tau_ref = 0.5                    # Temps de reponse (temps de réponse en s)
-ttc_ref = 2.                    # Time to collision (s)
+k_ref = 0.3                     # Agressivité en accélération
+tau_ref = 1.0                    # Temps de reponse (temps de réponse en s)
+ttc_ref = 2.0                  # Time to collision (s)
 # # Paramètres Temporels
 dt = 0.05                       # Pas de temps
-T_total = 100.0                 # Durée totale
+T_total = 300.0                 # Durée totale
 
 # Define a structure for simulation parameters
 def create_params(N=N_ref, L=L_ref, spacing=spacing_ref, V_target=V_target_ref, t_reac=tau_ref, a_max=a_max_ref, a_min = a_min_ref, k=k_ref, ttc=ttc_ref):
@@ -50,31 +50,31 @@ def create_params(N=N_ref, L=L_ref, spacing=spacing_ref, V_target=V_target_ref, 
 def a_adjust(vitesses, positions, params):
     """Compute acceleration adjustments for vehicles based on their velocities and positions."""
     u = np.zeros(params['N'])
-    u[0] = (params['V_target'][0] - vitesses[0])
+    u[0] = params['k'][0] * (params['V_target'][0] - vitesses[0])
 
     # Calculate current gap and desired gap
     alpha = (positions[:-1]- positions[1:]) - params['L']
-    alpha_want = np.maximum(vitesses[1:] * params['ttc'][1:], 3*params['L'])
 
-    # l > 1.0 : accélère
-    # l < 1.0 : freine
+    # Calculate optimal braking distance
+    braking_distance = (vitesses[1:]**2) / (2 * abs(params['a_min']))
+    
+    # Calculate desired distance 
+    alpha_want = np.maximum(vitesses[1:] * params['ttc'][1:] + braking_distance * (1-params['k'][1:]), params['L']*2)
+
+
     l = np.clip(alpha / alpha_want, 0.0, 1.0)
 
     a_norm = np.minimum(params['k'][1:] * (params['V_target'][1:] - vitesses[1:]), params['a_max'])
     a_crit = params['a_min']
-
-    # interpolation
+    # Interpolation 
     u[1:] = l * a_norm + (1 - l) * a_crit
     return u
 
-
 def simulate(params, brake_moments, metrics=False):
     """Simulate the traffic flow based on given parameters and brake moments.
-
-    Input:
+    Arguments:
     - params: Dictionary containing simulation parameters.
     - brake_moments: List of tuples (moment, duration, force) indicating when brakes are applied to the leading car
-
     Returns:
     - X: Positions of cars over time.
     - V: Velocities of cars over time.
@@ -94,7 +94,13 @@ def simulate(params, brake_moments, metrics=False):
     A = np.zeros((nb_steps, N))
 
     # Initial positions
-    X[0] = -np.arange(N) * spacing
+    gaps = V_target * params['ttc'] + L
+
+
+    # Make the distances initially safe, generate X from gaps
+    X[0] = -np.cumsum(np.concatenate(([0], gaps[:-1])))
+    # X[0] = -np.arange(N) * spacing
+    # X[0] = -np.arange(N) * spacing
     V[0] = V_target
 
     crash = None
@@ -110,27 +116,29 @@ def simulate(params, brake_moments, metrics=False):
                 break
         # perturb = (10.0 < t < 13.0)
 
-        u = a_adjust(V[i], X[i], params)     
+        # get acceleration
+        u = a_adjust(V[i], X[i], params) 
+            
         if perturb>0:
-            u[0] -= perturb
-        else:
-            u[0] = np.clip(k[0] * (V_target[0] - V[i][0]), params['a_min'], params['a_max'])
+            u[0] = -perturb
 
         # step  
         A[i+1] = A[i] + (dt / params['t_reac']) * (u - A[i])
         V[i+1] = np.maximum(V[i] + A[i+1] * dt, 0.0)
         X[i+1] = X[i] + V[i+1] * dt
+        
 
         # Check for accidents
         alphas = (X[i+1, :-1] - X[i+1, 1:]) - L
 
+
         if np.any(alphas < 0):
+            if crash is None:
+                idx_crash = np.where(alphas < 0)[0][0] + 1
+                pos_crash = X[i+1, idx_crash]
+                crash = (t, pos_crash)
 
-            idx_crash = np.where(alphas < 0)[0][0] + 1
-            pos_crash = X[i+1, idx_crash]
-            crash = (t, pos_crash)
-
-            # Stop simulation
+            #Stop simulation
             X[i+1:] = X[i+1]
             V[i+1:] = V[i+1]
             break
@@ -145,15 +153,11 @@ def simulate(params, brake_moments, metrics=False):
         gap_mean = np.mean(gaps)        # Average density indicator
         gap_min = np.min(gaps)          # Critical safety margin
         
-
-
-        
         return np.array([float(int(crash is not None)), speed_std, speed_mean, gap_std, gap_mean, gap_min])
     
-    # avg_stability, max_stability
+        # avg_stability, max_stability
         # return speed_std, speed_mean, gap_std, gap_mean, gap_min, crash is not None
     return X, V, crash
-
 
 def get_simulation_data(params, brake, brake_moments):
     """Call simulation with given parameters and brake settings."""
@@ -162,7 +166,6 @@ def get_simulation_data(params, brake, brake_moments):
         brake_moments = []
     brakes = [(m, brake_time, brake_force) for m in brake_moments]
     return simulate(params, brakes)
-
 
 def visualize_trajectories(params, brake_force, ax):
 
@@ -183,7 +186,6 @@ def visualize_trajectories(params, brake_force, ax):
 
     ax.set_ylabel("Position (m)")
     ax.set_xlabel("Time (s)")
-
 
 def visualize(data, params, brake_moments, t, return_data=False):
     """Visualize the traffic simulation at a specific time t.
@@ -272,7 +274,6 @@ def visualize(data, params, brake_moments, t, return_data=False):
 
     plt.tight_layout()
     plt.show()
-
 
 def animate(params, brake, brake_moments=None):
     """Create an animation of the traffic simulation.
